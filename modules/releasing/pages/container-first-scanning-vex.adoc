@@ -1,0 +1,67 @@
+= Container-first scanning and VEX support
+:icons: font
+:numbered:
+
+The release-service-catalog supports *container-first* vulnerability scanning and *Vulnerability Exploitability eXchange (VEX)* reporting. To do this, image labels, release tags, and advisory metadata are aligned so that scanners (such as Clair) can match VEX statements to images using only information in the filesystem.
+
+== Image labels required at build time
+
+For container-first scanning, images must carry specific labels. A Konflux build task writes a *`labels.json`* file to *`/root/buildinfo/labels.json`* in the final image layer (without adding an extra layer; see link:https://issues.redhat.com/browse/KONFLUX-7507[KONFLUX-7507]). Clair and other scanners use this file to match image layers to Red Hat published VEX documents.
+
+.*Required labels*
+
+* *`org.opencontainers.image.created`* — Set by a Konflux build task and enforced by Conforma. A single build time must be used across all architectures. You can influence Konflux to use `SOURCE_DATE_EPOCH` instead of the actual build time.
+* *Name label* — Supplied by the product team and enforced by Conforma. At release time, the release pipeline enforces that this label matches the *destination repository name* (namespace + repository name). For example, for `registry.redhat.io/openshift-gitops-1/gitops-rhel8-operator:v1.15.2-4` the name label must be `openshift-gitops-1/gitops-rhel8-operator`, not just `gitops-rhel8-operator`. This value appears in the VEX statement and must match the label.
+* *CPE label* (Common Platform Enumeration) — Supplied by the product team and enforced by Conforma. At release time, the pipeline confirms the image CPE label matches the release CPE only when a CPE label is present, so rollout can be progressive. Obtain the correct CPE from product-security and set it in your Dockerfiles or Containerfiles.
+
+NOTE: Conforma enforcement applies only to *on-prem product release policies*, not to managed-service release policies.
+
+== Using `canonicalName` in the ReleasePlanAdmission mapping
+
+When the image *name* label does not match the destination repository, set *`canonicalName`* in the component mapping. The release pipeline then compares the *name* label to `canonicalName` instead of the destination repository.
+
+*Example:* An image with name label `ubi9/ubi` is published to both `ubi9/ubi` and `ubi9`. The ReleasePlanAdmission that publishes to `ubi9/ubi` does not need `canonicalName`. The ReleasePlanAdmission that publishes to `ubi9` must set `canonicalName` to `ubi9/ubi`.
+
++
+*Example component with `canonicalName` and `{{ timestamp }}` tag*
+
++
+[source,yaml]
+----
+data:
+  mapping:
+    components:
+      - name: my-component
+        repository: registry.redhat.io/namespace/my-component
+        tags: ["{{ timestamp }}"]   <.>
+        canonicalName: namespace/my-component   <.>
+----
+
++
+<.> Use the `{{ timestamp }}` tag template so the purl in advisory metadata uses a stable, timestamp-based tag that scanners can match to the image.
+<.> Required when the *name* label (for example, `namespace/my-component`) does not match the destination repository path.
+
+== Timestamp tag and advisory metadata
+
+Release pipelines that produce advisories (such as the *rh-advisories* pipeline) use the *apply-mapping*, *check-labels*, and *populate-release-notes* tasks so that:
+
+. The *apply-mapping* task adds the resolved `{{ timestamp }}` value to the tag list when the pipeline runs *check-labels* (via the `addImplicitTimestampTag` parameter).
+. The *check-labels* task validates that destination repository names and CPEs match the image labels.
+. The *populate-release-notes* task prefers the timestamp-derived tag as `uniqueTag` for the purl written to advisory metadata.
+
+The purl in VEX files then looks like:
+
++
+[source,text]
+----
+pkg:oci/gatekeeper-rhel8-operator@sha256:digest?arch=arm64&repository_url=registry.redhat.io/rhacm2/gatekeeper-rhel8-operator&tag=1742843776
+----
+
++
+The component name in the purl (for example, `gatekeeper-rhel8-operator`) is taken from the *name* label with the repository namespace stripped. Public VEX statements can then be matched to identifiers in the image filesystem.
+
+== Next steps
+
+* Ensure your ReleasePlanAdmission mapping includes a `{{ timestamp }}` tag for components that use the rh-advisories (or similar) pipeline, and set `canonicalName` when the name label does not match the destination repository.
+* Document how product teams retrieve the correct *CPE* value from product-security and set it in their Dockerfiles or Containerfiles. A mass pull request can supply initial CPE label values across repositories.
+* See xref:create-release-plan-admission.adoc[Creating a release plan admission] to configure the pipeline and data used for release.
